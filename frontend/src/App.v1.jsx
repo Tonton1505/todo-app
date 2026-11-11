@@ -136,7 +136,7 @@ export default function App() {
       <div className="fixed inset-0 pointer-events-none opacity-40 bg-[radial-gradient(#336791_1px,transparent_1px)] [background-size:24px_24px]" />
 
       {/* Centered Application Card - PostgreSQL Blue Inspired */}
-      <div className="relative w-full max-w-xl bg-white rounded-2xl shadow-xl shadow-slate-300/60 border border-slate-200 overflow-hidden flex flex-col transition-all">
+      <div className="relative w-full max-w-xl bg-white rounded-2xl shadow-lg shadow-slate-300/60 border border-slate-200 overflow-hidden flex flex-col transition-all">
         
         {/* PostgreSQL Top Navigation Bar Header */}
         <div className="bg-[#336791] px-6 py-2.5 flex items-center justify-between text-white border-b border-[#275073]">
@@ -223,7 +223,7 @@ export default function App() {
 
           {/* Error Message Notification */}
           {errorMessage && (
-            <div className="p-3.5 bg-red-50 border-l-4 border-red-500 text-red-700 text-xs rounded-r-xl flex items-center justify-between shadow-sm animate-shake">
+            <div className="p-3.5 bg-red-50 border-l-4 border-red-500 text-red-700 text-xs rounded-r-xl flex items-center justify-between shadow-sm">
               <div className="flex items-center gap-2">
                 <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
@@ -315,10 +315,7 @@ export default function App() {
 
         {/* Footer: K8s Status Bar - Strictly Black BG, Neon Green text */}
         <footer className="bg-black text-green-400 font-mono text-xs px-4 py-3.5 text-center border-t border-slate-800 tracking-wide select-none">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            🚀 Đang xử lý bởi Pod: <span className="font-semibold text-green-300">{podName}</span> | Phiên bản: <span className="font-semibold text-green-300">{version}</span>
-          </span>
+          🚀 Đang xử lý bởi Pod: <span className="font-semibold text-green-300">{podName}</span> | Phiên bản: <span className="font-semibold text-green-300">{version}</span>
         </footer>
 
       </div>
