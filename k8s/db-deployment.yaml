@@ -1,0 +1,73 @@
+# ==============================================================================
+# PersistentVolumeClaim: Lưu trữ dữ liệu bền vững cho PostgreSQL
+# ==============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-db-pvc
+  namespace: cloud-web-app
+  labels:
+    app: todo-db
+    tier: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# ==============================================================================
+# Deployment: PostgreSQL Database Service
+# ==============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-db
+  namespace: cloud-web-app
+  labels:
+    app: todo-db
+    tier: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: todo-db
+  template:
+    metadata:
+      labels:
+        app: todo-db
+        tier: database
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: "tododb"
+            - name: POSTGRES_USER
+              value: "todouser"
+            - name: POSTGRES_PASSWORD
+              value: "todopassword"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "todouser", "-d", "tododb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: db-storage
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: backend-db-pvc
