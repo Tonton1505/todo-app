@@ -32,11 +32,11 @@ const PORT = parseInt(process.env.PORT, 10) || 5000;
 
 // PostgreSQL Connection Pool using designated environment variables
 const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
+  host: process.env.DB_HOST || 'todo-db-service',
   port: parseInt(process.env.DB_PORT, 10) || 5432,
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-  database: process.env.DB_NAME || 'todo_db',
+  user: process.env.DB_USER || 'todouser',
+  password: process.env.DB_PASSWORD || 'todopassword',
+  database: process.env.DB_NAME || 'tododb',
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
@@ -48,7 +48,8 @@ pool.on('error', (err) => {
 
 // Helper function to generate Kubernetes Metadata signature
 const getK8sMeta = () => ({
-  podName: process.env.HOSTNAME || 'localhost',
+  podName: process.env.POD_NAME || process.env.HOSTNAME || 'localhost',
+  nodeName: process.env.NODE_NAME || 'worker1',
   version: process.env.APP_VERSION || 'v1.0',
 });
 
@@ -94,13 +95,13 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 3. KUBERNETES PROBES (OPTIONAL BUT STANDARD)
+// 3. KUBERNETES PROBES (COMPATIBLE WITH /health AND /healthz)
 // ==========================================
-app.get('/healthz', (req, res) => {
-  res.status(200).json({ status: 'UP', _k8s_meta: getK8sMeta() });
+app.get(['/health', '/healthz'], (req, res) => {
+  res.status(200).json({ status: 'UP', service: 'todo-backend', _k8s_meta: getK8sMeta() });
 });
 
-app.get('/readyz', async (req, res) => {
+app.get(['/ready', '/readyz'], async (req, res) => {
   try {
     const client = await pool.connect();
     await client.query('SELECT 1');
@@ -112,14 +113,14 @@ app.get('/readyz', async (req, res) => {
 });
 
 // ==========================================
-// 4. API ENDPOINTS (/api/tasks)
+// 4. API ENDPOINTS (SUPPORT BOTH /api/tasks AND /api/todos)
 // ==========================================
 
 /**
- * 1. GET /api/tasks
+ * 1. GET /api/tasks & GET /api/todos
  * Trả về danh sách tasks sắp xếp theo ID giảm dần.
  */
-app.get('/api/tasks', async (req, res) => {
+app.get(['/api/tasks', '/api/todos'], async (req, res) => {
   try {
     const query = 'SELECT id, title, completed FROM tasks ORDER BY id DESC';
     const result = await pool.query(query);
@@ -142,10 +143,10 @@ app.get('/api/tasks', async (req, res) => {
 });
 
 /**
- * 2. POST /api/tasks
+ * 2. POST /api/tasks & POST /api/todos
  * Nhận { title }, lưu vào DB, mặc định completed=false.
  */
-app.post('/api/tasks', async (req, res) => {
+app.post(['/api/tasks', '/api/todos'], async (req, res) => {
   try {
     const { title } = req.body;
 
@@ -186,10 +187,11 @@ app.post('/api/tasks', async (req, res) => {
 });
 
 /**
- * 3. PUT /api/tasks/:id
+ * 3. PUT /api/tasks/:id, PUT /api/todos/:id & PATCH /api/todos/:id/toggle
  * Cập nhật trạng thái completed của task.
  */
-app.put('/api/tasks/:id', async (req, res) => {
+app.all(['/api/tasks/:id', '/api/todos/:id', '/api/todos/:id/toggle'], async (req, res, next) => {
+  if (req.method !== 'PUT' && req.method !== 'PATCH') return next();
   try {
     const { id } = req.params;
     const { completed } = req.body;
