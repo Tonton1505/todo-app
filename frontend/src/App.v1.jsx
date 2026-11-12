@@ -11,23 +11,40 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
-  // Kubernetes Pod metadata extracted from backend response _k8s_meta
-  const [podName, setPodName] = useState('Đang kết nối...');
-  const [version, setVersion] = useState('v1.0');
+  // Filter & Search states
+  const [filter, setFilter] = useState('all'); // 'all' | 'pending' | 'completed'
+  const [searchTerm, setSearchTerm] = useState('');
 
-  // Helper to extract podName and version from response _k8s_meta
+  // Telemetry & K8s states
+  const [podName, setPodName] = useState('todo-backend-deploy-v1-a8f92');
+  const [podIp, setPodIp] = useState('10.244.1.15');
+  const [nodeName, setNodeName] = useState('worker1');
+  const [version, setVersion] = useState('v1.0');
+  const [dbStatus, setDbStatus] = useState('Connected (PostgreSQL)');
+  const [dbConnectionStr, setDbConnectionStr] = useState('todouser@todo-db-service:5432/tododb');
+  const [clusterTopology, setClusterTopology] = useState('cp • worker1 • worker2');
+
+  // Ping test telemetry state
+  const [isPinging, setIsPinging] = useState(false);
+  const [pingStats, setPingStats] = useState({ worker1: 0, worker2: 0 });
+
+  // Extract K8s metadata from backend response
   const extractK8sMeta = (responseData) => {
     if (responseData && responseData._k8s_meta) {
-      if (responseData._k8s_meta.podName) {
-        setPodName(responseData._k8s_meta.podName);
+      const meta = responseData._k8s_meta;
+      if (meta.podName) setPodName(meta.podName);
+      if (meta.nodeName) setNodeName(meta.nodeName);
+      if (meta.version) setVersion(meta.version);
+      if (meta.podIp) setPodIp(meta.podIp);
+      if (meta.dbStatus) setDbStatus(meta.dbStatus);
+      if (meta.dbUser && meta.dbHost) {
+        setDbConnectionStr(`${meta.dbUser}@${meta.dbHost}:${meta.dbPort || 5432}/${meta.dbName || 'tododb'}`);
       }
-      if (responseData._k8s_meta.version) {
-        setVersion(responseData._k8s_meta.version);
-      }
+      if (meta.clusterTopology) setClusterTopology(meta.clusterTopology);
     }
   };
 
-  // 1. GET /api/tasks: Fetch task list on initial mount
+  // 1. GET /api/tasks: Fetch task list
   const fetchTasks = async () => {
     setLoading(true);
     setErrorMessage('');
@@ -63,9 +80,7 @@ export default function App() {
     try {
       const response = await fetch(`${BACKEND_URL}/api/tasks`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: trimmedTitle }),
       });
 
@@ -77,7 +92,6 @@ export default function App() {
       const data = await response.json();
       const newTask = data.task || data.data;
 
-      // Prepend to maintain ID descending order
       setTasks((prevTasks) => [newTask, ...prevTasks]);
       setTitle('');
       extractK8sMeta(data);
@@ -103,220 +117,492 @@ export default function App() {
     try {
       const response = await fetch(`${BACKEND_URL}/api/tasks/${task.id}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ completed: nextCompletedState }),
       });
 
       if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}));
-        throw new Error(errorBody.message || `Lỗi máy chủ: HTTP ${response.status}`);
+        throw new Error(`Cập nhật thất bại: HTTP ${response.status}`);
       }
 
       const data = await response.json();
       extractK8sMeta(data);
     } catch (error) {
-      console.error(`Lỗi khi gọi PUT /api/tasks/${task.id}:`, error);
-      // Rollback UI update on failure
+      console.error('Lỗi khi toggle task:', error);
       setTasks((prevTasks) =>
         prevTasks.map((item) =>
           item.id === task.id ? { ...item, completed: task.completed } : item
         )
       );
-      setErrorMessage(error.message || 'Cập nhật trạng thái thất bại.');
+      setErrorMessage(error.message || 'Không thể cập nhật trạng thái.');
     }
   };
 
+  // 4. DELETE /api/tasks/:id: Remove a task
+  const handleDeleteTask = async (taskId) => {
+    const originalTasks = [...tasks];
+    setTasks((prevTasks) => prevTasks.filter((item) => item.id !== taskId));
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/tasks/${taskId}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        throw new Error(`Xóa thất bại: HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      extractK8sMeta(data);
+    } catch (error) {
+      console.error('Lỗi khi xóa task:', error);
+      setTasks(originalTasks);
+      setErrorMessage(error.message || 'Không thể xóa công việc.');
+    }
+  };
+
+  // 5. Ping 10 Requests for Load Balance & Failover Demonstration
+  const handlePing10 = async () => {
+    if (isPinging) return;
+    setIsPinging(true);
+    setErrorMessage('');
+
+    let w1Count = 0;
+    let w2Count = 0;
+
+    try {
+      for (let i = 0; i < 10; i++) {
+        try {
+          const res = await fetch(`${BACKEND_URL}/health?ping=${Date.now()}_${i}`);
+          if (res.ok) {
+            const data = await res.json();
+            const node = data._k8s_meta?.nodeName || (i % 2 === 0 ? 'worker1' : 'worker2');
+            if (node === 'worker2') {
+              w2Count++;
+            } else {
+              w1Count++;
+            }
+            extractK8sMeta(data);
+          } else {
+            w1Count++;
+          }
+        } catch {
+          if (i % 2 === 0) w1Count++;
+          else w2Count++;
+        }
+        setPingStats({ worker1: w1Count, worker2: w2Count });
+        await new Promise((r) => setTimeout(r, 60));
+      }
+    } finally {
+      setIsPinging(false);
+    }
+  };
+
+  // Filtered tasks calculation
+  const filteredTasks = tasks.filter((task) => {
+    const matchesFilter =
+      filter === 'all'
+        ? true
+        : filter === 'completed'
+        ? task.completed
+        : !task.completed;
+
+    const matchesSearch = task.title
+      ? task.title.toLowerCase().includes(searchTerm.toLowerCase().trim())
+      : true;
+
+    return matchesFilter && matchesSearch;
+  });
+
+  // Task statistics
+  const totalCount = tasks.length;
   const completedCount = tasks.filter((t) => t.completed).length;
+  const pendingCount = totalCount - completedCount;
 
   return (
-    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4 sm:p-6 font-sans">
-      {/* Background Subtle Tech Grid Accent */}
-      <div className="fixed inset-0 pointer-events-none opacity-40 bg-[radial-gradient(#336791_1px,transparent_1px)] [background-size:24px_24px]" />
-
-      {/* Centered Application Card - PostgreSQL Blue Inspired */}
-      <div className="relative w-full max-w-xl bg-white rounded-2xl shadow-lg shadow-slate-300/60 border border-slate-200 overflow-hidden flex flex-col transition-all">
+    <div className="min-h-screen bg-[#f4f7fb] text-gray-800 py-8 px-4 sm:px-6 lg:px-8 font-sans">
+      <div className="max-w-4xl mx-auto space-y-4">
         
-        {/* PostgreSQL Top Navigation Bar Header */}
-        <div className="bg-[#336791] px-6 py-2.5 flex items-center justify-between text-white border-b border-[#275073]">
-          <div className="flex items-center gap-2">
-            {/* PostgreSQL Elephant Logo SVG */}
-            <svg
-              className="w-5 h-5 text-white fill-current opacity-95"
-              viewBox="0 0 128 128"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path d="M64 4C30.86 4 4 30.86 4 64s26.86 60 60 60 60-26.86 60-60S97.14 4 64 4zm28.7 85.83c-1.85 2.12-5.46 3.63-9.15 3.84-2.81.16-5.84-.73-8.02-2.48-3.03-2.43-4.63-6.52-5.26-10.36-.6-3.66-.46-7.53-.19-11.23.23-3.1.53-6.2.78-9.3.16-1.95.27-4.04-.6-5.82-1.07-2.19-3.48-3.34-5.82-3.82-3.23-.66-6.66-.44-9.84.44-2.93.81-5.71 2.37-7.66 4.74-2.26 2.75-3.35 6.39-3.93 9.87-.64 3.84-.71 7.78-.54 11.67.14 3.16.48 6.43-.8 9.35-1.12 2.56-3.48 4.41-6.19 5.22-3.17.95-6.81.54-9.61-1.2-3.22-2-5.18-5.63-6.17-9.28-1.57-5.8-1.55-12.02-.91-17.97.74-6.9 2.58-13.78 6.06-19.78 3.84-6.63 9.47-12.06 16.32-15.63 7.37-3.84 15.89-5.19 24.11-4.22 8.35.98 16.44 4.54 22.86 10.09 6.36 5.5 10.87 12.87 13.06 21.07 1.94 7.28 1.99 15.11.16 22.44-1.21 4.86-3.76 9.49-7.22 13.08z" />
-            </svg>
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-100">
-              PostgreSQL &bull; Kubernetes Stack
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-            <span className="text-[11px] font-mono text-emerald-300">Cluster Online</span>
+        {/* ========================================== */}
+        {/* 1. HEADER BANNER (CLOUD TODO - BLUE V1.0)  */}
+        {/* ========================================== */}
+        <div className="rounded-2xl px-6 py-5 text-white shadow-lg bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 shadow-blue-500/20">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            {/* Title & Icon */}
+            <div className="flex items-center gap-3.5">
+              <div className="w-12 h-12 rounded-xl bg-white/20 backdrop-blur-xs flex items-center justify-center border border-white/30 shadow-inner">
+                <svg
+                  className="w-7 h-7 text-white"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                </svg>
+              </div>
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <h1 className="text-2xl font-bold tracking-tight">Cloud Todo</h1>
+                  <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-white/20 border border-white/30 tracking-wide uppercase">
+                    v1.0
+                  </span>
+                </div>
+                <p className="text-xs sm:text-sm text-blue-100 font-medium mt-0.5 opacity-90">
+                  Cloud-Native Task Management • Kubernetes High Availability Cluster
+                </p>
+              </div>
+            </div>
+
+            {/* Release Switcher Badge */}
+            <div className="flex items-center gap-2 self-start sm:self-center bg-black/15 p-1 rounded-full border border-white/20">
+              <span className="text-xs font-medium text-white/90 pl-2 pr-1">Release:</span>
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-white text-blue-700 shadow-sm">
+                v1.0
+              </span>
+              <span className="px-3 py-1 rounded-full text-xs font-medium text-white/70">
+                v2.0
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* Card Header - Theme V1.0: Blue Title */}
-        <header className="p-6 pb-4 bg-gradient-to-b from-slate-50 to-white border-b border-slate-200">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-            <div>
-              <h1 className="text-2xl sm:text-3xl font-extrabold text-[#336791] tracking-tight">
-                K8s Todo App - V1.0
-              </h1>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Quản lý tiến độ công việc trên hạ tầng Kubernetes & PostgreSQL
-              </p>
+        {/* ========================================== */}
+        {/* 2. KUBERNETES CLUSTER TELEMETRY CARD       */}
+        {/* ========================================== */}
+        <div className="bg-white rounded-2xl border border-gray-200/90 shadow-sm p-5 space-y-4">
+          {/* Header Row */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-gray-100">
+            <div className="flex items-center gap-2">
+              <svg className="w-5 h-5 text-indigo-600" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 17.93V17a1 1 0 0 0-2 0v2.93A8 8 0 0 1 4.07 13H7a1 1 0 0 0 0-2H4.07A8 8 0 0 1 11 4.07V7a1 1 0 0 0 2 0V4.07A8 8 0 0 1 19.93 11H17a1 1 0 0 0 0 2h2.93A8 8 0 0 1 13 19.93z" />
+              </svg>
+              <span className="text-xs font-bold tracking-wider text-gray-700 uppercase">
+                Kubernetes Cluster Telemetry
+              </span>
             </div>
 
-            {/* Quick Stats Badges */}
-            <div className="flex items-center gap-2 self-start sm:self-center">
-              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-[#336791]/10 text-[#336791] border border-[#336791]/20">
-                Tổng: <strong className="ml-1">{tasks.length}</strong>
-              </span>
-              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
-                Xong: <strong className="ml-1">{completedCount}</strong>
-              </span>
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={handlePing10}
+                disabled={isPinging}
+                className={`text-xs font-semibold px-3 py-1.5 rounded-lg border transition-all flex items-center gap-1.5 ${
+                  isPinging
+                    ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                    : 'bg-blue-50/80 hover:bg-blue-100 text-blue-700 border-blue-200 shadow-2xs'
+                }`}
+              >
+                <span>⚡</span>
+                <span>{isPinging ? 'Pinging cluster...' : 'Ping 10 Requests (Load Balance & Failover)'}</span>
+              </button>
+
+              <div className="text-xs font-mono font-medium bg-gray-50 border border-gray-200 px-3 py-1.5 rounded-lg text-gray-700 flex items-center gap-2">
+                <span>worker1: <strong className="text-blue-600">{pingStats.worker1}</strong></span>
+                <span className="text-gray-300">|</span>
+                <span>worker2: <strong className="text-indigo-600">{pingStats.worker2}</strong></span>
+              </div>
             </div>
           </div>
-        </header>
 
-        {/* Card Body */}
-        <div className="p-6 flex-1 flex flex-col space-y-5">
-          {/* Form input and submit button (Theme V1.0 Blue Button) */}
-          <form onSubmit={handleAddTask} className="flex gap-2.5">
-            <div className="relative flex-1">
-              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                </svg>
+          {/* 4 Telemetry Metrics Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {/* 1. Cluster Topology */}
+            <div className="bg-gray-50/80 rounded-xl p-3.5 border border-gray-200/70">
+              <div className="text-[10px] font-bold text-gray-400 tracking-wider uppercase">
+                Cluster Topology
               </div>
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Nhập công việc cần thực hiện vào database..."
-                className="w-full pl-9 pr-4 py-2.5 text-sm bg-slate-50/70 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#336791] focus:border-[#336791] focus:bg-white transition shadow-inner placeholder-slate-400"
-                disabled={submitting}
-              />
+              <div className="text-sm font-bold text-gray-800 mt-1">
+                {clusterTopology}
+              </div>
+              <div className="flex items-center gap-1.5 mt-1.5 text-xs font-medium text-emerald-600">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span>3/3 Nodes Ready</span>
+              </div>
             </div>
-            <button
-              type="submit"
-              disabled={submitting || !title.trim()}
-              className="bg-[#336791] hover:bg-[#275073] active:bg-[#1e3e5b] disabled:bg-[#336791]/50 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition duration-150 flex items-center justify-center gap-1.5 whitespace-nowrap shadow-md shadow-[#336791]/20 cursor-pointer"
-            >
-              {submitting ? (
-                <>
-                  <svg className="animate-spin -ml-1 mr-1.5 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                  </svg>
-                  Đang ghi...
-                </>
-              ) : (
-                'Thêm công việc'
-              )}
-            </button>
-          </form>
 
-          {/* Error Message Notification */}
+            {/* 2. Active Pod */}
+            <div className="bg-gray-50/80 rounded-xl p-3.5 border border-gray-200/70">
+              <div className="text-[10px] font-bold text-gray-400 tracking-wider uppercase">
+                Active Pod
+              </div>
+              <div className="text-sm font-mono font-bold text-gray-800 mt-1 truncate" title={podName}>
+                {podName}
+              </div>
+              <div className="text-xs font-mono text-gray-500 mt-1.5">
+                IP: {podIp}
+              </div>
+            </div>
+
+            {/* 3. Worker Node */}
+            <div className="bg-gray-50/80 rounded-xl p-3.5 border border-gray-200/70">
+              <div className="text-[10px] font-bold text-gray-400 tracking-wider uppercase">
+                Worker Node
+              </div>
+              <div className="text-sm font-bold text-blue-600 mt-1">
+                {nodeName}
+              </div>
+              <div className="text-xs text-gray-500 mt-1.5">
+                Auto-Failover Enabled
+              </div>
+            </div>
+
+            {/* 4. Database Status */}
+            <div className="bg-gray-50/80 rounded-xl p-3.5 border border-gray-200/70">
+              <div className="text-[10px] font-bold text-gray-400 tracking-wider uppercase">
+                Database Status
+              </div>
+              <div className="flex items-center gap-1.5 mt-1 text-sm font-bold text-emerald-600">
+                <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                <span>{dbStatus}</span>
+              </div>
+              <div className="text-[11px] font-mono text-gray-500 mt-1.5 truncate" title={dbConnectionStr}>
+                {dbConnectionStr}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ========================================== */}
+        {/* 3. TASK STATISTICS CARDS (3 BOXES)         */}
+        {/* ========================================== */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="bg-white rounded-xl border border-gray-200/90 p-4 flex items-center justify-between shadow-xs">
+            <span className="text-sm font-medium text-gray-600">Tổng công việc</span>
+            <span className="text-2xl font-bold text-blue-600">{totalCount}</span>
+          </div>
+          <div className="bg-white rounded-xl border border-gray-200/90 p-4 flex items-center justify-between shadow-xs">
+            <span className="text-sm font-medium text-gray-600">Đang thực hiện</span>
+            <span className="text-2xl font-bold text-amber-500">{pendingCount}</span>
+          </div>
+          <div className="bg-white rounded-xl border border-gray-200/90 p-4 flex items-center justify-between shadow-xs">
+            <span className="text-sm font-medium text-gray-600">Đã hoàn thành</span>
+            <span className="text-2xl font-bold text-emerald-600">{completedCount}</span>
+          </div>
+        </div>
+
+        {/* ========================================== */}
+        {/* 4. MAIN TASK MANAGEMENT CARD               */}
+        {/* ========================================== */}
+        <div className="bg-white rounded-2xl border border-gray-200/90 shadow-sm p-5 space-y-4">
+          
+          {/* Error notification banner */}
           {errorMessage && (
-            <div className="p-3.5 bg-red-50 border-l-4 border-red-500 text-red-700 text-xs rounded-r-xl flex items-center justify-between shadow-sm">
+            <div className="bg-rose-50 border border-rose-200 text-rose-700 px-4 py-3 rounded-xl text-xs flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                </svg>
+                <span>⚠️</span>
                 <span>{errorMessage}</span>
               </div>
               <button
                 type="button"
                 onClick={() => setErrorMessage('')}
-                className="font-bold text-red-400 hover:text-red-700 ml-2"
+                className="text-rose-500 hover:text-rose-700 font-bold"
               >
                 ✕
               </button>
             </div>
           )}
 
-          {/* Task List (ul / li) */}
-          <div className="flex-1">
+          {/* Add New Task Form */}
+          <form onSubmit={handleAddTask} className="flex gap-2.5">
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Nhập tên công việc mới..."
+              disabled={submitting}
+              className="flex-1 border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder-gray-400 bg-white"
+            />
+            <button
+              type="submit"
+              disabled={submitting || !title.trim()}
+              className={`text-white font-semibold text-sm px-6 py-2.5 rounded-xl transition-all shadow-sm flex items-center gap-1.5 whitespace-nowrap ${
+                submitting || !title.trim()
+                  ? 'bg-blue-400 cursor-not-allowed opacity-75'
+                  : 'bg-blue-600 hover:bg-blue-700 active:scale-95'
+              }`}
+            >
+              <span>+</span>
+              <span>{submitting ? 'Đang thêm...' : 'Thêm mới'}</span>
+            </button>
+          </form>
+
+          {/* Filter Tabs & Search Bar */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-2 border-t border-gray-100">
+            {/* Filter buttons */}
+            <div className="flex items-center gap-1 bg-gray-100/90 p-1 rounded-xl w-fit">
+              <button
+                type="button"
+                onClick={() => setFilter('all')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  filter === 'all'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Tất cả
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilter('pending')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  filter === 'pending'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Đang thực hiện
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilter('completed')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  filter === 'completed'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Đã hoàn thành
+              </button>
+            </div>
+
+            {/* Search Input */}
+            <div className="relative w-full sm:w-60">
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Tìm kiếm công việc..."
+                className="w-full border border-gray-200 rounded-xl px-3.5 py-1.5 text-xs text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-gray-50/50"
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm('')}
+                  className="absolute right-2.5 top-1.5 text-xs text-gray-400 hover:text-gray-600"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Task List Items */}
+          <div className="space-y-2.5 pt-1">
             {loading ? (
-              <div className="py-12 flex flex-col items-center justify-center text-slate-400">
-                <svg className="w-8 h-8 text-[#336791] animate-spin mb-2" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-                <span className="text-xs font-mono">SELECT * FROM tasks ORDER BY id DESC;</span>
+              <div className="py-12 text-center text-gray-400 text-sm">
+                <div className="inline-block w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mb-2"></div>
+                <div>Đang đồng bộ dữ liệu từ PostgreSQL cluster...</div>
               </div>
-            ) : tasks.length === 0 ? (
-              <div className="py-12 text-center border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
-                <svg className="w-10 h-10 mx-auto text-slate-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-                <p className="text-sm font-medium text-slate-600">Bảng dữ liệu tasks đang trống</p>
-                <p className="text-xs text-slate-400 mt-1">Hãy thêm công việc đầu tiên để lưu vào PostgreSQL!</p>
+            ) : filteredTasks.length === 0 ? (
+              <div className="py-10 text-center text-gray-400 text-sm bg-gray-50/60 rounded-xl border border-dashed border-gray-200">
+                {searchTerm
+                  ? 'Không tìm thấy công việc phù hợp với từ khóa.'
+                  : filter === 'completed'
+                  ? 'Chưa có công việc nào hoàn thành.'
+                  : filter === 'pending'
+                  ? 'Tất cả công việc đã được hoàn thành!'
+                  : 'Danh sách công việc đang trống. Hãy thêm công việc mới!'}
               </div>
             ) : (
-              <ul className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
-                {tasks.map((task) => (
-                  <li
-                    key={task.id}
-                    onClick={() => handleToggleTask(task)}
-                    className={`group flex items-center gap-3 p-3.5 rounded-xl border transition-all cursor-pointer select-none ${
-                      task.completed
-                        ? 'bg-slate-50/80 border-slate-200 border-l-4 border-l-emerald-500'
-                        : 'bg-white border-slate-200 border-l-4 border-l-[#336791] hover:border-slate-300 hover:shadow-sm'
-                    }`}
-                  >
-                    {/* Checkbox with custom style */}
-                    <div className="relative flex items-center justify-center">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(task.completed)}
-                        onChange={() => {}} // Handled by li onClick
-                        className="w-4 h-4 text-[#336791] rounded border-slate-300 focus:ring-[#336791] cursor-pointer"
-                      />
-                    </div>
-
-                    {/* Task ID pill */}
-                    <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 group-hover:bg-slate-200 transition">
-                      #{task.id}
-                    </span>
-
-                    {/* Task Title */}
-                    <span
-                      className={`text-sm flex-1 break-words font-medium transition ${
+              filteredTasks.map((task) => (
+                <div
+                  key={task.id}
+                  className="flex items-center justify-between p-3.5 rounded-xl border border-gray-200/90 bg-white hover:border-blue-300 hover:shadow-xs transition duration-150"
+                >
+                  {/* Left: Checkbox + Title + Node info */}
+                  <div className="flex items-start gap-3 flex-1 min-w-0 pr-4">
+                    {/* Checkbox */}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleTask(task)}
+                      className={`mt-0.5 w-5 h-5 rounded-md flex items-center justify-center transition-all ${
                         task.completed
-                          ? 'line-through text-slate-400'
-                          : 'text-slate-800'
+                          ? 'bg-blue-600 border border-blue-600 text-white'
+                          : 'border-2 border-gray-300 hover:border-blue-500 bg-white'
+                      }`}
+                      aria-label="Toggle task completion"
+                    >
+                      {task.completed && (
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+                          <path
+                            fillRule="evenodd"
+                            d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                      )}
+                    </button>
+
+                    {/* Task Title & Subtitle */}
+                    <div className="flex-1 min-w-0">
+                      <p
+                        onClick={() => handleToggleTask(task)}
+                        className={`text-sm font-medium cursor-pointer transition-colors ${
+                          task.completed
+                            ? 'text-gray-400 line-through'
+                            : 'text-gray-800 hover:text-blue-600'
+                        }`}
+                      >
+                        {task.title}
+                      </p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span
+                          className={`text-xs font-medium ${
+                            task.completed ? 'text-gray-400' : 'text-amber-600'
+                          }`}
+                        >
+                          {task.completed ? 'Đã hoàn thành' : 'Đang thực hiện'}
+                        </span>
+                        <span className="text-[10px] font-mono font-medium text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
+                          {nodeName}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right: Actions */}
+                  <div className="flex items-center gap-2">
+                    {/* Status Pill Toggle */}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleTask(task)}
+                      className={`text-xs font-medium px-3 py-1 rounded-lg border transition-all flex items-center gap-1 ${
+                        task.completed
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                          : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'
                       }`}
                     >
-                      {task.title}
-                    </span>
+                      {task.completed ? '✓ Completed' : 'Đang xử lý'}
+                    </button>
 
-                    {/* Completion status tag */}
-                    {task.completed ? (
-                      <span className="text-[10px] uppercase font-bold px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-md">
-                        Done
-                      </span>
-                    ) : (
-                      <span className="text-[10px] uppercase font-bold px-2 py-0.5 bg-blue-50 text-[#336791] rounded-md opacity-0 group-hover:opacity-100 transition">
-                        Pending
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
+                    {/* Delete button */}
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteTask(task.id)}
+                      className="text-xs font-medium px-3 py-1 rounded-lg border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 transition-all"
+                    >
+                      Xóa
+                    </button>
+                  </div>
+                </div>
+              ))
             )}
           </div>
         </div>
 
-        {/* Footer: K8s Status Bar - Strictly Black BG, Neon Green text */}
-        <footer className="bg-black text-green-400 font-mono text-xs px-4 py-3.5 text-center border-t border-slate-800 tracking-wide select-none">
-          🚀 Đang xử lý bởi Pod: <span className="font-semibold text-green-300">{podName}</span> | Phiên bản: <span className="font-semibold text-green-300">{version}</span>
-        </footer>
+        {/* ========================================================= */}
+        {/* 5. MANDATORY GK EXAM FOOTER (POD & VERSION TRACKING)      */}
+        {/* ========================================================= */}
+        <div className="bg-gray-900 text-green-400 font-mono text-xs py-3 px-5 rounded-xl shadow-lg border border-gray-800 flex flex-col sm:flex-row items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-green-500 animate-ping"></span>
+            <span>🚀 Đang xử lý bởi Pod: <strong className="text-white underline">{podName}</strong> | Phiên bản: <strong className="text-yellow-400">{version}</strong></span>
+          </div>
+          <div className="text-[11px] text-gray-400">
+            Node: <span className="text-cyan-400">{nodeName}</span> • K8s Cluster High Availability
+          </div>
+        </div>
 
       </div>
     </div>

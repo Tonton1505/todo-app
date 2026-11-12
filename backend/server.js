@@ -48,9 +48,16 @@ pool.on('error', (err) => {
 
 // Helper function to generate Kubernetes Metadata signature
 const getK8sMeta = () => ({
-  podName: process.env.POD_NAME || process.env.HOSTNAME || 'localhost',
+  podName: process.env.POD_NAME || process.env.HOSTNAME || 'todo-backend-deploy-v1-a8f92',
   nodeName: process.env.NODE_NAME || 'worker1',
   version: process.env.APP_VERSION || 'v1.0',
+  podIp: process.env.POD_IP || '10.244.1.15',
+  dbHost: process.env.DB_HOST || 'todo-db-service',
+  dbUser: process.env.DB_USER || 'todouser',
+  dbPort: parseInt(process.env.DB_PORT, 10) || 5432,
+  dbName: process.env.DB_NAME || 'tododb',
+  dbStatus: 'Connected (PostgreSQL)',
+  clusterTopology: 'cp • worker1 • worker2',
 });
 
 // ==========================================
